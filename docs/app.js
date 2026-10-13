@@ -38,6 +38,9 @@ const els = {
 
 let config = { requiresCode: false, maxScriptChars: 1500 };
 let previous = null; // { script, errorCount }
+let lastFeedback = null; // 最後に表示し終えた添削結果
+let revealed = new Set(); // 「答えを見る」を押した指摘のid
+let showBetter = false; // 「もっと良くする」提案を表示するか
 let history = []; // なんでも質問の会話 [{ role, content }]
 let asking = false;
 
@@ -116,7 +119,10 @@ async function init() {
   els.checkBtn.addEventListener("click", check);
   els.feedback.addEventListener("click", onFeedbackClick);
   els.feedback.addEventListener("change", (e) => {
-    if (e.target.id === "show-better") els.feedback.classList.toggle("hide-better", !e.target.checked);
+    if (e.target.id === "show-better") {
+      showBetter = e.target.checked;
+      els.feedback.classList.toggle("hide-better", !showBetter);
+    }
   });
 
   els.tabAsk.addEventListener("click", () => selectTab("ask"));
@@ -175,21 +181,130 @@ async function check() {
 
   selectTab("result");
   setLoading(true);
-  try {
-    const previousScript = previous && previous.script !== script ? previous.script : "";
-    const { feedback } = MOCK
-      ? { feedback: await mockFeedback(lesson, { script, previousScript }) }
-      : await api("/check", { script, previousScript });
+  revealed = new Set();
+  showBetter = false;
+  const previousScript = previous && previous.script !== script ? previous.script : "";
+  const prevErrorCount = previousScript ? previous.errorCount : null;
+  if (isNarrow()) els.side.scrollIntoView({ behavior: "smooth", block: "start" });
 
-    const errorCount = countIssues(feedback, "error");
-    render(feedback, previousScript ? previous.errorCount : null);
-    previous = { script, errorCount };
+  try {
+    const feedback = MOCK
+      ? await mockFeedback(lesson, { script, previousScript })
+      : await streamCheck({ script, previousScript }, (partial) => {
+          // 書き出された部分から順に表示する
+          if (!partial.summary) return;
+          els.loading.hidden = true;
+          els.feedback.hidden = false;
+          render(partial, null, true);
+        });
+
+    render(feedback, prevErrorCount, false);
+    lastFeedback = feedback;
+    previous = { script, errorCount: countIssues(feedback, "error") };
     if (els.paneResult.hidden) els.resultBadge.hidden = false;
-    if (isNarrow()) els.side.scrollIntoView({ behavior: "smooth", block: "start" });
   } catch (err) {
     showError(err.message);
+    // 途中まで表示した結果は消して、前回の結果に戻す
+    if (lastFeedback) render(lastFeedback, null, false);
   } finally {
     setLoading(false);
+  }
+}
+
+// 添削結果を少しずつ受け取る。onPartial には途中までの結果が渡される
+async function streamCheck(body, onPartial) {
+  const res = await fetch(`${API_URL.replace(/\/$/, "")}/check`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ lessonId: lesson.id, accessCode: els.code.value.trim(), ...body }),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || "エラーが起きました。もう一度試してください。");
+  }
+
+  const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
+  let buf = "";
+  let text = "";
+  let done = false;
+  let scheduled = false;
+  const flush = () => {
+    scheduled = false;
+    const partial = parsePartialJson(text);
+    if (partial) onPartial(partial);
+  };
+
+  while (!done) {
+    const { value, done: streamDone } = await reader.read();
+    if (streamDone) break;
+    buf += value;
+    let idx;
+    while ((idx = buf.indexOf("\n")) !== -1) {
+      const line = buf.slice(0, idx).trim();
+      buf = buf.slice(idx + 1);
+      if (!line) continue;
+      const ev = JSON.parse(line);
+      if (ev.type === "delta") text += ev.text;
+      else if (ev.type === "error") throw new Error(ev.error);
+      else if (ev.type === "done") done = true;
+    }
+    if (!scheduled && !done) {
+      scheduled = true;
+      requestAnimationFrame(flush);
+    }
+  }
+  if (!done) throw new Error("通信が途中で切れました。もう一度試してください。");
+  return JSON.parse(text);
+}
+
+// 書きかけのJSONを、そこまでに完成している部分だけで読めるように閉じて解釈する。
+// （このアプリの結果は文字列・配列・オブジェクトだけなので、数値などは扱わない）
+function parsePartialJson(text) {
+  const stack = [];
+  let inString = false;
+  let escaped = false;
+  let isKey = false;
+  let expectKey = false;
+  let safe = -1;
+  let safeStack = [];
+  const mark = (i) => {
+    safe = i + 1;
+    safeStack = stack.slice();
+  };
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (c === "\\") escaped = true;
+      else if (c === '"') {
+        inString = false;
+        if (!isKey) mark(i);
+      }
+      continue;
+    }
+    if (c === '"') {
+      inString = true;
+      isKey = stack.at(-1) === "{" && expectKey;
+      expectKey = false;
+    } else if (c === "{") {
+      stack.push("{");
+      expectKey = true;
+    } else if (c === "[") {
+      stack.push("[");
+      mark(i);
+    } else if (c === "}" || c === "]") {
+      stack.pop();
+      mark(i);
+    } else if (c === ",") {
+      expectKey = stack.at(-1) === "{";
+    }
+  }
+  if (safe < 0) return null;
+  const closers = safeStack.reverse().map((b) => (b === "{" ? "}" : "]")).join("");
+  try {
+    return JSON.parse(text.slice(0, safe) + closers);
+  } catch {
+    return null;
   }
 }
 
@@ -197,16 +312,23 @@ function setLoading(on) {
   els.checkBtn.disabled = on;
   els.checkBtn.querySelector(".btn-label").textContent = on ? "チェック中…" : previous ? "もう一度チェックする" : "チェックする";
   els.loading.hidden = !on;
-  els.empty.hidden = on || Boolean(previous);
-  els.feedback.hidden = on || !previous;
+  els.empty.hidden = on || Boolean(lastFeedback);
+  els.feedback.hidden = on || !lastFeedback;
 }
 
-const countIssues = (fb, kind) => fb.sentences.reduce((n, s) => n + s.issues.filter((i) => i.kind === kind).length, 0);
+// 途中までの結果では、項目がまだそろっていないものを表示しない
+const complete = (obj, keys) => obj && keys.every((k) => obj[k] !== undefined);
+const sentencesOf = (fb) =>
+  (fb.sentences || [])
+    .filter((s) => complete(s, ["text", "section"]))
+    .map((s) => ({ ...s, issues: (s.issues || []).filter((i) => complete(i, ["original", "suggestion", "kind", "hint", "explanation"])) }));
+
+const countIssues = (fb, kind) => sentencesOf(fb).reduce((n, s) => n + s.issues.filter((i) => i.kind === kind).length, 0);
 
 const STATUS_ICON = { ok: "✅", weak: "🔸", missing: "⚠️" };
 const KIND_LABEL = { error: "直そう", better: "もっと良くする" };
 
-function render(fb, prevErrorCount) {
+function render(fb, prevErrorCount, streaming) {
   const secLabel = Object.fromEntries(lesson.sections.map((s) => [s.id, s.label]));
   secLabel.other = "その他";
   const errors = countIssues(fb, "error");
@@ -227,13 +349,16 @@ function render(fb, prevErrorCount) {
     ${progress}
   </div>`;
 
-  const good = fb.good_points.length
-    ? `<div class="fb-block"><h3>⭐ 良いところ</h3><ul class="good-list">${fb.good_points
+  const goodPoints = fb.good_points || [];
+  const good = goodPoints.length
+    ? `<div class="fb-block"><h3>⭐ 良いところ</h3><ul class="good-list">${goodPoints
         .map((g) => `<li>${escapeHtml(g)}</li>`)
         .join("")}</ul></div>`
     : "";
 
-  const structure = `<div class="fb-block"><h3>📋 構成チェック</h3><ul class="structure">${fb.structure
+  const structureItems = (fb.structure || []).filter((s) => complete(s, ["section", "status", "comment"]));
+  const structure = structureItems.length
+    ? `<div class="fb-block"><h3>📋 構成チェック</h3><ul class="structure">${structureItems
     .map(
       (s) => `<li class="${s.status}">
         <span aria-hidden="true">${STATUS_ICON[s.status]}</span>
@@ -241,10 +366,12 @@ function render(fb, prevErrorCount) {
         ${s.status === "ok" ? "" : `<span class="s-comment">${escapeHtml(s.comment)}</span>`}
       </li>`,
     )
-    .join("")}</ul></div>`;
+    .join("")}</ul></div>`
+    : "";
 
   let issueId = 0;
-  const sentences = fb.sentences
+  const sentenceItems = sentencesOf(fb);
+  const sentences = sentenceItems
     .map((s) => {
       const issues = s.issues.map((i) => ({ ...i, id: `issue-${issueId++}` }));
       return `<div class="sentence">
@@ -260,20 +387,24 @@ function render(fb, prevErrorCount) {
     ${betters ? `<span class="chip better">もっと良くする ${betters}</span>` : ""}
   </div>`;
 
-  const betterToggle = betters
-    ? `<label class="optional-toggle"><input type="checkbox" id="show-better"> 「もっと良くする」提案も表示する</label>`
+  const betterToggle = betters && !streaming
+    ? `<label class="optional-toggle"><input type="checkbox" id="show-better"${showBetter ? " checked" : ""}> 「もっと良くする」提案も表示する</label>`
     : "";
 
-  const script = `<div class="fb-block"><h3>✏️ あなたの原稿</h3>
-    ${counts}
+  const writing = streaming ? `<p class="writing"><span class="dots" aria-hidden="true"><i></i><i></i><i></i></span> 続きを書いています…</p>` : "";
+
+  const script = sentenceItems.length
+    ? `<div class="fb-block"><h3>✏️ あなたの原稿</h3>
+    ${streaming ? "" : counts}
     <p class="next">色のついたところをタップすると、ヒントが見られます。まずは自分で考えて、原稿を直してみよう。わからないときは「💬 なんでも質問」で聞いてもOK。</p>
     ${sentences}
     ${betterToggle}
-    <button type="button" class="reveal back-to-edit" data-back>✏️ 原稿を直しにもどる</button>
-  </div>`;
+    ${streaming ? "" : `<button type="button" class="reveal back-to-edit" data-back>✏️ 原稿を直しにもどる</button>`}
+  </div>`
+    : "";
 
-  els.feedback.innerHTML = summary + good + structure + script;
-  els.feedback.classList.add("hide-better");
+  els.feedback.innerHTML = summary + good + structure + script + writing;
+  els.feedback.classList.toggle("hide-better", !showBetter);
 }
 
 function highlight(text, issues) {
@@ -310,8 +441,8 @@ function issueCard(i) {
       <span class="issue-target">“${escapeHtml(i.original)}”</span>
     </div>
     <p class="hint">${escapeHtml(i.hint)}</p>
-    <button type="button" class="reveal" data-reveal="${i.id}">答えを見る</button>
-    <div class="answer" hidden>
+    ${revealed.has(i.id) ? "" : `<button type="button" class="reveal" data-reveal="${i.id}">答えを見る</button>`}
+    <div class="answer"${revealed.has(i.id) ? "" : " hidden"}>
       <p class="fix"><del>${escapeHtml(i.original)}</del> → <ins>${escapeHtml(i.suggestion)}</ins></p>
       <p class="why">${escapeHtml(i.explanation)}</p>
     </div>
@@ -321,6 +452,7 @@ function issueCard(i) {
 function onFeedbackClick(e) {
   const reveal = e.target.closest("[data-reveal]");
   if (reveal) {
+    revealed.add(reveal.dataset.reveal);
     reveal.nextElementSibling.hidden = false;
     reveal.remove();
     return;
@@ -341,6 +473,7 @@ function focusIssue(mark) {
     const toggle = document.getElementById("show-better");
     if (toggle && !toggle.checked) {
       toggle.checked = true;
+      showBetter = true;
       els.feedback.classList.remove("hide-better");
     }
   }

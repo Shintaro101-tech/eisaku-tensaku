@@ -9,7 +9,7 @@ ALLOWED_ORIGIN = "https://shintaro101-tech.github.io"
 ACCESS_CODE = ""
 OPENAI_MODEL = "gpt-6.1-sol"
 OPENAI_EFFORT = "low"
-RATE_LIMIT_PER_MIN = "60"
+RATE_LIMIT_PER_MIN = "300"
 
 # OPENAI_API_KEY は公開されないよう secret として登録する：
 #   npx wrangler secret put OPENAI_API_KEY

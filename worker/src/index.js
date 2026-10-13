@@ -7,7 +7,7 @@
 //   ACCESS_CODE         任意。クラスコード。設定すると生徒はコードの入力が必要
 //   OPENAI_MODEL        初期値 gpt-6.1-sol
 //   OPENAI_EFFORT       初期値 low
-//   RATE_LIMIT_PER_MIN  初期値 60（同じIPからの1分あたりの回数）
+//   RATE_LIMIT_PER_MIN  初期値 300（同じIPからの1分あたりの回数。学校の回線は全員同じIPになりやすい）
 
 import { lesson4 } from "../../docs/lessons/lesson4.js";
 
@@ -139,13 +139,13 @@ async function handleCheck(body, env) {
   let input = `## 生徒の原稿\n<script>\n${script}\n</script>`;
   if (prev) input += `\n\n## 前回の原稿\n<previous_script>\n${prev}\n</previous_script>`;
 
-  const feedback = await callOpenAI(env, {
+  // 添削は時間がかかるので、書き出された部分から順に画面へ送る
+  return streamOpenAI(env, {
     instructions: checkInstructions(lesson),
     input: [{ role: "user", content: input }],
     schemaName: "feedback",
     schema: checkSchema(lesson),
   });
-  return { feedback };
 }
 
 // ---- なんでも質問 ----
@@ -209,7 +209,7 @@ async function handleAsk(body, env) {
 }
 
 // ---- OpenAI 呼び出し（Responses API + Structured Outputs） ----
-async function callOpenAI(env, { instructions, input, schemaName, schema }) {
+async function openAIFetch(env, { instructions, input, schemaName, schema }, stream) {
   const res = await fetch("https://api.openai.com/v1/responses", {
     method: "POST",
     headers: {
@@ -223,6 +223,7 @@ async function callOpenAI(env, { instructions, input, schemaName, schema }) {
       input,
       max_output_tokens: 16000,
       store: false,
+      stream,
       text: { format: { type: "json_schema", name: schemaName, schema, strict: true } },
     }),
   });
@@ -233,18 +234,106 @@ async function callOpenAI(env, { instructions, input, schemaName, schema }) {
     if (res.status === 429) throw new UserFacingError("いま混み合っています。少し待ってからもう一度試してください。", 503);
     throw new UserFacingError("AIとの通信でエラーが起きました。もう一度試してください。", 502);
   }
+  return res;
+}
 
+// 所要時間とトークン数をログに残す（`npx wrangler tail` で見られる。費用と速さの確認用）
+function logUsage(schemaName, data, started) {
+  const u = data.usage || {};
+  console.log(JSON.stringify({
+    schema: schemaName,
+    model: data.model,
+    ms: Date.now() - started,
+    input_tokens: u.input_tokens,
+    output_tokens: u.output_tokens,
+    reasoning_tokens: u.output_tokens_details?.reasoning_tokens,
+  }));
+}
+
+const hasRefusal = (data) =>
+  (data.output || []).some((o) => o.type === "message" && (o.content || []).some((c) => c.type === "refusal"));
+
+const MSG_REFUSAL = "この内容には答えられませんでした。書き方を変えてもう一度試してください。";
+const MSG_INCOMPLETE = "文章が長すぎて最後まで答えられませんでした。";
+
+async function callOpenAI(env, params) {
+  const started = Date.now();
+  const res = await openAIFetch(env, params, false);
   const data = await res.json();
+  logUsage(params.schemaName, data, started);
   if (data.status === "incomplete") {
     console.error("OpenAI incomplete:", JSON.stringify(data.incomplete_details));
-    throw new UserFacingError("文章が長すぎて最後まで答えられませんでした。", 422);
+    throw new UserFacingError(MSG_INCOMPLETE, 422);
   }
+  if (hasRefusal(data)) throw new UserFacingError(MSG_REFUSAL, 422);
   const content = (data.output || []).filter((o) => o.type === "message").flatMap((o) => o.content || []);
-  if (content.some((c) => c.type === "refusal")) {
-    throw new UserFacingError("この内容には答えられませんでした。書き方を変えてもう一度試してください。", 422);
-  }
   const text = content.filter((c) => c.type === "output_text").map((c) => c.text).join("");
   return JSON.parse(text);
+}
+
+// OpenAI のストリーミング（SSE）を、1行1イベントのJSON（NDJSON）に変えて画面へ流す
+//   {"type":"delta","text":"..."}  … 添削結果（JSON文字列）の続き
+//   {"type":"done"}                 … 完了
+//   {"type":"error","error":"..."}  … 途中で失敗
+async function streamOpenAI(env, params) {
+  const started = Date.now();
+  const res = await openAIFetch(env, params, true);
+  const { readable, writable } = new TransformStream();
+  const writer = writable.getWriter();
+  const encoder = new TextEncoder();
+  const send = (obj) => writer.write(encoder.encode(JSON.stringify(obj) + "\n"));
+
+  (async () => {
+    let finished = false;
+    try {
+      const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
+      let buf = "";
+      while (!finished) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += value;
+        let idx;
+        while (!finished && (idx = buf.indexOf("\n\n")) !== -1) {
+          const block = buf.slice(0, idx);
+          buf = buf.slice(idx + 2);
+          const data = block
+            .split("\n")
+            .filter((l) => l.startsWith("data:"))
+            .map((l) => l.slice(5).trim())
+            .join("\n");
+          if (!data || data === "[DONE]") continue;
+          let ev;
+          try { ev = JSON.parse(data); } catch { continue; }
+
+          if (ev.type === "response.output_text.delta") {
+            await send({ type: "delta", text: ev.delta });
+          } else if (ev.type === "response.completed") {
+            logUsage(params.schemaName, ev.response, started);
+            await send(hasRefusal(ev.response) ? { type: "error", error: MSG_REFUSAL } : { type: "done" });
+            finished = true;
+          } else if (ev.type === "response.incomplete") {
+            console.error("OpenAI incomplete:", JSON.stringify(ev.response?.incomplete_details));
+            await send({ type: "error", error: MSG_INCOMPLETE });
+            finished = true;
+          } else if (ev.type === "response.failed" || ev.type === "error") {
+            console.error("OpenAI stream error:", data.slice(0, 500));
+            await send({ type: "error", error: "AIとの通信でエラーが起きました。もう一度試してください。" });
+            finished = true;
+          }
+        }
+      }
+      if (!finished) await send({ type: "error", error: "通信が途中で切れました。もう一度試してください。" });
+    } catch (err) {
+      console.error(err);
+      await send({ type: "error", error: "エラーが起きました。もう一度試してください。" }).catch(() => {});
+    } finally {
+      await writer.close().catch(() => {});
+    }
+  })();
+
+  return new Response(readable, {
+    headers: { "Content-Type": "application/x-ndjson; charset=utf-8", "Cache-Control": "no-cache" },
+  });
 }
 
 // ---- ルーティング ----
@@ -289,10 +378,15 @@ export default {
         throw new UserFacingError("クラスコードがちがいます。先生に確認してください。", 401);
       }
       const ip = request.headers.get("CF-Connecting-IP") || "local";
-      if (rateLimited(ip, Number(env.RATE_LIMIT_PER_MIN) || 60)) {
+      if (rateLimited(ip, Number(env.RATE_LIMIT_PER_MIN) || 300)) {
         throw new UserFacingError("少し時間をおいてから、もう一度試してください。", 429);
       }
-      return json(await handler(body, env), 200, cors);
+      const out = await handler(body, env);
+      if (out instanceof Response) {
+        for (const [k, v] of Object.entries(cors)) out.headers.set(k, v);
+        return out;
+      }
+      return json(out, 200, cors);
     } catch (err) {
       if (err instanceof UserFacingError) return json({ error: err.message }, err.status, cors);
       console.error(err);

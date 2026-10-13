@@ -57,7 +57,7 @@ npx wrangler deploy
 | `ACCESS_CODE` | なし | クラスコード（空なら不要） |
 | `OPENAI_MODEL` | `gpt-6.1-sol` | 安くしたいときは `gpt-6-luna` |
 | `OPENAI_EFFORT` | `low` | 考える深さ。`medium` にすると丁寧になるが、遅く・高くなる |
-| `RATE_LIMIT_PER_MIN` | `60` | 同じIPアドレスからの1分あたりの回数の目安。学校の回線は全員が同じIPになりやすい |
+| `RATE_LIMIT_PER_MIN` | `300` | 同じIPアドレスからの1分あたりの回数の目安。学校の回線は全員が同じIPになりやすい |
 
 ## ローカルで画面を確認する
 
