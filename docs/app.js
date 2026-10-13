@@ -49,10 +49,18 @@ const escapeHtml = (s) =>
   String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 
 function storageGet() {
-  try { return JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}"); } catch { return {}; }
+  try {
+    return JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}");
+  } catch {
+    return {};
+  }
 }
 function storageSet(data) {
-  try { localStorage.setItem(STORAGE_KEY, JSON.stringify({ ...storageGet(), ...data })); } catch { /* 保存できなくても動く */ }
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({ ...storageGet(), ...data }));
+  } catch {
+    /* 保存できなくても動く */
+  }
 }
 
 function countText(text) {
@@ -228,31 +236,37 @@ async function streamCheck(body, onPartial) {
   let text = "";
   let done = false;
   let scheduled = false;
+  let closed = false;
   const flush = () => {
     scheduled = false;
+    if (closed) return; // 完了後に遅れて届いた描き直しで、最終結果を上書きしない
     const partial = parsePartialJson(text);
     if (partial) onPartial(partial);
   };
 
-  while (!done) {
-    const { value, done: streamDone } = await reader.read();
-    if (streamDone) break;
-    buf += value;
-    let idx;
-    while ((idx = buf.indexOf("\n")) !== -1) {
-      const line = buf.slice(0, idx).trim();
-      buf = buf.slice(idx + 1);
-      if (!line) continue;
-      const ev = JSON.parse(line);
-      if (ev.type === "delta") text += ev.text;
-      else if (ev.type === "error") throw new Error(ev.error);
-      else if (ev.type === "done") done = true;
+  try {
+    while (!done) {
+      const { value, done: streamDone } = await reader.read();
+      if (streamDone) break;
+      buf += value;
+      let idx;
+      while ((idx = buf.indexOf("\n")) !== -1) {
+        const line = buf.slice(0, idx).trim();
+        buf = buf.slice(idx + 1);
+        if (!line) continue;
+        const ev = JSON.parse(line);
+        if (ev.type === "delta") text += ev.text;
+        else if (ev.type === "error") throw new Error(ev.error);
+        else if (ev.type === "done") done = true;
+      }
+      // 描き直しは0.15秒に1回まで（タブが裏にあっても止まらないよう setTimeout を使う）
+      if (!scheduled && !done) {
+        scheduled = true;
+        setTimeout(flush, 150);
+      }
     }
-    // 描き直しは0.15秒に1回まで（タブが裏にあっても止まらないよう setTimeout を使う）
-    if (!scheduled && !done) {
-      scheduled = true;
-      setTimeout(flush, 150);
-    }
+  } finally {
+    closed = true;
   }
   if (!done) throw new Error("通信が途中で切れました。もう一度試してください。");
   return JSON.parse(text);
@@ -301,7 +315,10 @@ function parsePartialJson(text) {
     }
   }
   if (safe < 0) return null;
-  const closers = safeStack.reverse().map((b) => (b === "{" ? "}" : "]")).join("");
+  const closers = safeStack
+    .reverse()
+    .map((b) => (b === "{" ? "}" : "]"))
+    .join("");
   try {
     return JSON.parse(text.slice(0, safe) + closers);
   } catch {
@@ -311,7 +328,11 @@ function parsePartialJson(text) {
 
 function setLoading(on) {
   els.checkBtn.disabled = on;
-  els.checkBtn.querySelector(".btn-label").textContent = on ? "チェック中…" : previous ? "もう一度チェックする" : "チェックする";
+  els.checkBtn.querySelector(".btn-label").textContent = on
+    ? "チェック中…"
+    : previous
+      ? "もう一度チェックする"
+      : "チェックする";
   els.loading.hidden = !on;
   els.empty.hidden = on || Boolean(lastFeedback);
   els.feedback.hidden = on || !lastFeedback;
@@ -322,9 +343,13 @@ const complete = (obj, keys) => obj && keys.every((k) => obj[k] !== undefined);
 const sentencesOf = (fb) =>
   (fb.sentences || [])
     .filter((s) => complete(s, ["text", "section"]))
-    .map((s) => ({ ...s, issues: (s.issues || []).filter((i) => complete(i, ["original", "suggestion", "kind", "hint", "explanation"])) }));
+    .map((s) => ({
+      ...s,
+      issues: (s.issues || []).filter((i) => complete(i, ["original", "suggestion", "kind", "hint", "explanation"])),
+    }));
 
-const countIssues = (fb, kind) => sentencesOf(fb).reduce((n, s) => n + s.issues.filter((i) => i.kind === kind).length, 0);
+const countIssues = (fb, kind) =>
+  sentencesOf(fb).reduce((n, s) => n + s.issues.filter((i) => i.kind === kind).length, 0);
 
 const STATUS_ICON = { ok: "✅", weak: "🔸", missing: "⚠️" };
 const KIND_LABEL = { error: "直そう", better: "もっと良くする" };
@@ -360,14 +385,14 @@ function render(fb, prevErrorCount, streaming) {
   const structureItems = (fb.structure || []).filter((s) => complete(s, ["section", "status", "comment"]));
   const structure = structureItems.length
     ? `<div class="fb-block"><h3>📋 構成チェック</h3><ul class="structure">${structureItems
-    .map(
-      (s) => `<li class="${s.status}">
+        .map(
+          (s) => `<li class="${s.status}">
         <span aria-hidden="true">${STATUS_ICON[s.status]}</span>
         <span class="s-name">${escapeHtml(secLabel[s.section] || s.section)}</span>
         ${s.status === "ok" ? "" : `<span class="s-comment">${escapeHtml(s.comment)}</span>`}
       </li>`,
-    )
-    .join("")}</ul></div>`
+        )
+        .join("")}</ul></div>`
     : "";
 
   let issueId = 0;
@@ -388,11 +413,14 @@ function render(fb, prevErrorCount, streaming) {
     ${betters ? `<span class="chip better">もっと良くする ${betters}</span>` : ""}
   </div>`;
 
-  const betterToggle = betters && !streaming
-    ? `<label class="optional-toggle"><input type="checkbox" id="show-better"${showBetter ? " checked" : ""}> 「もっと良くする」提案も表示する</label>`
-    : "";
+  const betterToggle =
+    betters && !streaming
+      ? `<label class="optional-toggle"><input type="checkbox" id="show-better"${showBetter ? " checked" : ""}> 「もっと良くする」提案も表示する</label>`
+      : "";
 
-  const writing = streaming ? `<p class="writing"><span class="dots" aria-hidden="true"><i></i><i></i><i></i></span> 続きを書いています…</p>` : "";
+  const writing = streaming
+    ? `<p class="writing"><span class="dots" aria-hidden="true"><i></i><i></i><i></i></span> 続きを書いています…</p>`
+    : "";
 
   const script = sentenceItems.length
     ? `<div class="fb-block"><h3>✏️ あなたの原稿</h3>
@@ -529,8 +557,7 @@ function answerHtml(a) {
 }
 
 // 会話の履歴としてAIに渡すためのテキスト版
-const answerText = (a) =>
-  [a.answer, ...a.phrases.map((p) => `${p.en}（${p.ja}）`), a.tip].filter(Boolean).join("\n");
+const answerText = (a) => [a.answer, ...a.phrases.map((p) => `${p.en}（${p.ja}）`), a.tip].filter(Boolean).join("\n");
 
 async function ask() {
   const question = els.question.value.trim();
@@ -545,7 +572,10 @@ async function ask() {
   els.question.value = "";
   autoGrow();
   appendBubble("user", `<p>${escapeHtml(question)}</p>`);
-  const pending = appendBubble("assistant pending", `<span class="dots" aria-label="考えています"><i></i><i></i><i></i></span>`);
+  const pending = appendBubble(
+    "assistant pending",
+    `<span class="dots" aria-label="考えています"><i></i><i></i><i></i></span>`,
+  );
 
   try {
     const script = els.withScript.checked ? els.script.value.trim() : "";
