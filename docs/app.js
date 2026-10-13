@@ -248,9 +248,10 @@ async function streamCheck(body, onPartial) {
       else if (ev.type === "error") throw new Error(ev.error);
       else if (ev.type === "done") done = true;
     }
+    // 描き直しは0.15秒に1回まで（タブが裏にあっても止まらないよう setTimeout を使う）
     if (!scheduled && !done) {
       scheduled = true;
-      requestAnimationFrame(flush);
+      setTimeout(flush, 150);
     }
   }
   if (!done) throw new Error("通信が途中で切れました。もう一度試してください。");
