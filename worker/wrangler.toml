@@ -1,0 +1,15 @@
+name = "eisaku-tensaku"
+main = "src/index.js"
+compatibility_date = "2026-10-01"
+
+[vars]
+# GitHub Pages のURL（末尾の / は不要）。例："https://yourname.github.io"
+ALLOWED_ORIGIN = "https://shintaro101-tech.github.io"
+# クラスコード（空なら不要）
+ACCESS_CODE = ""
+OPENAI_MODEL = "gpt-6.1-sol"
+OPENAI_EFFORT = "low"
+RATE_LIMIT_PER_MIN = "60"
+
+# OPENAI_API_KEY は公開されないよう secret として登録する：
+#   npx wrangler secret put OPENAI_API_KEY

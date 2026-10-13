@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>英文スピーチ添削</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="app-header">
+    <div class="wrap">
+      <p class="lesson-tag" id="lesson-title">Lesson 4</p>
+      <h1 id="lesson-subtitle">スピーチ原稿を添削しよう</h1>
+    </div>
+  </header>
+
+  <div id="mock-banner" class="banner" hidden>
+    サンプルモードで動いています（中継サーバーが未設定）。添削や回答は本物ではありません。
+  </div>
+
+  <main class="wrap layout">
+    <!-- 左：原稿 -->
+    <section class="panel input-panel" aria-labelledby="input-heading">
+      <div class="card">
+        <div class="card-head">
+          <h2 id="input-heading" class="label"><label for="script">原稿を書く・貼り付ける</label></h2>
+          <button type="button" class="link-btn" id="toggle-example" aria-expanded="false" aria-controls="example">例文を見る</button>
+        </div>
+        <div id="example" class="example" hidden></div>
+        <textarea id="script" rows="10" spellcheck="false" autocomplete="off"
+          placeholder="Hello.&#10;Today, I'm going to talk about my capsule toy idea.&#10;..."></textarea>
+        <div class="counter" id="counter" aria-live="polite">0 words · 0 文</div>
+
+        <div id="code-row" class="code-row" hidden>
+          <label for="access-code">クラスコード</label>
+          <input id="access-code" type="text" inputmode="text" autocomplete="off">
+        </div>
+
+        <button type="button" class="primary" id="check-btn">
+          <span class="btn-label">チェックする</span>
+        </button>
+        <p class="form-error" id="error" role="alert" hidden></p>
+      </div>
+    </section>
+
+    <!-- 右：質問 / 添削結果 -->
+    <section class="panel side-panel" id="side" aria-label="質問と添削結果">
+      <div class="tabs" role="tablist">
+        <button type="button" role="tab" id="tab-ask" aria-controls="pane-ask" aria-selected="true">💬 なんでも質問</button>
+        <button type="button" role="tab" id="tab-result" aria-controls="pane-result" aria-selected="false">✏️ 添削結果<span class="tab-badge" id="result-badge" hidden></span></button>
+      </div>
+
+      <!-- なんでも質問 -->
+      <div class="tab-pane ask-pane" id="pane-ask" role="tabpanel" aria-labelledby="tab-ask">
+        <div class="chat" id="chat" aria-live="polite">
+          <div class="chat-intro">
+            <p><strong>書いていてわからないことを、なんでも聞いてね。</strong><br>
+              日本語と英語でわかりやすく答えます。</p>
+            <div class="suggestions" id="suggestions"></div>
+          </div>
+        </div>
+        <form class="ask-form" id="ask-form">
+          <label class="with-script"><input type="checkbox" id="with-script" checked> 自分の原稿も見てもらう</label>
+          <div class="ask-row">
+            <label for="question" class="visually-hidden">質問</label>
+            <textarea id="question" rows="1" maxlength="300" placeholder="質問を書いてね"></textarea>
+            <button type="submit" class="send" id="ask-btn" aria-label="質問を送る">送る</button>
+          </div>
+        </form>
+      </div>
+
+      <!-- 添削結果 -->
+      <div class="tab-pane result-pane" id="pane-result" role="tabpanel" aria-labelledby="tab-result" hidden>
+        <div class="empty" id="empty">
+          <div class="empty-icon" aria-hidden="true">✏️</div>
+          <p>原稿を書いて <strong>「チェックする」</strong> を押すと、<br>ここに添削結果が出ます。</p>
+          <ol class="how">
+            <li>⭐ 良いところ</li>
+            <li>📋 構成チェック</li>
+            <li>✏️ 直すところ（まずはヒント → 答え）</li>
+          </ol>
+        </div>
+        <div class="loading" id="loading" hidden>
+          <div class="spinner" aria-hidden="true"></div>
+          <p>先生AIが読んでいます…<br><small>しばらくお待ちください</small></p>
+        </div>
+        <div id="feedback" aria-live="polite" hidden></div>
+      </div>
+    </section>
+  </main>
+
+  <script src="app.js" type="module"></script>
+</body>
+</html>

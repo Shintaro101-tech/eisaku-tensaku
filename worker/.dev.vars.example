@@ -1,0 +1,2 @@
+# ローカルで `npx wrangler dev` するときに使う（.dev.vars にコピーして書き込む）
+OPENAI_API_KEY=
