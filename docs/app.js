@@ -154,8 +154,8 @@ async function init() {
     ask();
   });
   els.question.addEventListener("keydown", (e) => {
-    // Enterで送信、Shift+Enterで改行（日本語変換中は送信しない）
-    if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
+    // Enterで送信、Shift+Enterで改行（日本語変換中は送信しない。keyCode 229 は変換確定のEnter）
+    if (e.key === "Enter" && !e.shiftKey && !e.isComposing && e.keyCode !== 229) {
       e.preventDefault();
       ask();
     }
@@ -219,7 +219,10 @@ async function check() {
   }
 }
 
-// 添削結果を少しずつ受け取る。onPartial には途中までの結果が渡される
+const MSG_FAILED = "添削中にエラーが起きました。もう一度試してください。";
+
+// 添削結果を少しずつ受け取る。onPartial には途中までの結果が渡される。
+// 中継サーバーは OpenAI のストリーミング（SSE）をそのまま流してくるので、ここで解釈する。
 async function streamCheck(body, onPartial) {
   const res = await fetch(`${API_URL.replace(/\/$/, "")}/check`, {
     method: "POST",
@@ -248,16 +251,36 @@ async function streamCheck(body, onPartial) {
     while (!done) {
       const { value, done: streamDone } = await reader.read();
       if (streamDone) break;
-      buf += value;
+      buf += value.replace(/\r\n/g, "\n");
       let idx;
-      while ((idx = buf.indexOf("\n")) !== -1) {
-        const line = buf.slice(0, idx).trim();
-        buf = buf.slice(idx + 1);
-        if (!line) continue;
-        const ev = JSON.parse(line);
-        if (ev.type === "delta") text += ev.text;
-        else if (ev.type === "error") throw new Error(ev.error);
-        else if (ev.type === "done") done = true;
+      while (!done && (idx = buf.indexOf("\n\n")) !== -1) {
+        const block = buf.slice(0, idx);
+        buf = buf.slice(idx + 2);
+        const data = block
+          .split("\n")
+          .filter((l) => l.startsWith("data:"))
+          .map((l) => l.slice(5).trim())
+          .join("\n");
+        if (!data || data === "[DONE]") continue;
+        let ev;
+        try {
+          ev = JSON.parse(data);
+        } catch {
+          continue;
+        }
+        if (ev.type === "response.output_text.delta") {
+          text += ev.delta;
+        } else if (ev.type === "response.completed") {
+          const refused = (ev.response?.output || []).some(
+            (o) => o.type === "message" && (o.content || []).some((c) => c.type === "refusal"),
+          );
+          if (refused) throw new Error("この原稿は添削できませんでした。内容を見直してもう一度試してください。");
+          done = true;
+        } else if (ev.type === "response.incomplete") {
+          throw new Error("原稿が長すぎて添削しきれませんでした。");
+        } else if (ev.type === "response.failed" || ev.type === "error") {
+          throw new Error(MSG_FAILED);
+        }
       }
       // 描き直しは0.15秒に1回まで（タブが裏にあっても止まらないよう setTimeout を使う）
       if (!scheduled && !done) {
@@ -267,9 +290,14 @@ async function streamCheck(body, onPartial) {
     }
   } finally {
     closed = true;
+    reader.cancel().catch(() => {});
   }
   if (!done) throw new Error("通信が途中で切れました。もう一度試してください。");
-  return JSON.parse(text);
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error(MSG_FAILED);
+  }
 }
 
 // 書きかけのJSONを、そこまでに完成している部分だけで読めるように閉じて解釈する。
@@ -498,13 +526,12 @@ function onFeedbackClick(e) {
 function focusIssue(mark) {
   const card = document.getElementById(mark.dataset.target);
   if (!card) return;
-  if (mark.classList.contains("better")) {
+  if (mark.classList.contains("better") && !showBetter) {
+    // 添削の途中ではチェックボックスがまだないので、状態だけ切り替える
+    showBetter = true;
     const toggle = document.getElementById("show-better");
-    if (toggle && !toggle.checked) {
-      toggle.checked = true;
-      showBetter = true;
-      els.feedback.classList.remove("hide-better");
-    }
+    if (toggle) toggle.checked = true;
+    els.feedback.classList.remove("hide-better");
   }
   els.feedback.querySelectorAll("mark.active").forEach((m) => m.classList.remove("active"));
   mark.classList.add("active");

@@ -271,68 +271,13 @@ async function callOpenAI(env, params) {
   return JSON.parse(text);
 }
 
-// OpenAI のストリーミング（SSE）を、1行1イベントのJSON（NDJSON）に変えて画面へ流す
-//   {"type":"delta","text":"..."}  … 添削結果（JSON文字列）の続き
-//   {"type":"done"}                 … 完了
-//   {"type":"error","error":"..."}  … 途中で失敗
+// OpenAI のストリーミング（SSE）を、中身を解析せずにそのまま画面へ流す。
+// Cloudflare 無料プランは1回あたりの計算時間が10ミリ秒までなので、ここでは何も処理しない。
+// （イベントの解釈は画面側 docs/app.js の streamCheck で行う）
 async function streamOpenAI(env, params) {
-  const started = Date.now();
   const res = await openAIFetch(env, params, true);
-  const { readable, writable } = new TransformStream();
-  const writer = writable.getWriter();
-  const encoder = new TextEncoder();
-  const send = (obj) => writer.write(encoder.encode(JSON.stringify(obj) + "\n"));
-
-  (async () => {
-    let finished = false;
-    try {
-      const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
-      let buf = "";
-      while (!finished) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        buf += value;
-        let idx;
-        while (!finished && (idx = buf.indexOf("\n\n")) !== -1) {
-          const block = buf.slice(0, idx);
-          buf = buf.slice(idx + 2);
-          const data = block
-            .split("\n")
-            .filter((l) => l.startsWith("data:"))
-            .map((l) => l.slice(5).trim())
-            .join("\n");
-          if (!data || data === "[DONE]") continue;
-          let ev;
-          try { ev = JSON.parse(data); } catch { continue; }
-
-          if (ev.type === "response.output_text.delta") {
-            await send({ type: "delta", text: ev.delta });
-          } else if (ev.type === "response.completed") {
-            logUsage(params.schemaName, ev.response, started);
-            await send(hasRefusal(ev.response) ? { type: "error", error: MSG_REFUSAL } : { type: "done" });
-            finished = true;
-          } else if (ev.type === "response.incomplete") {
-            console.error("OpenAI incomplete:", JSON.stringify(ev.response?.incomplete_details));
-            await send({ type: "error", error: MSG_INCOMPLETE });
-            finished = true;
-          } else if (ev.type === "response.failed" || ev.type === "error") {
-            console.error("OpenAI stream error:", data.slice(0, 500));
-            await send({ type: "error", error: "AIとの通信でエラーが起きました。もう一度試してください。" });
-            finished = true;
-          }
-        }
-      }
-      if (!finished) await send({ type: "error", error: "通信が途中で切れました。もう一度試してください。" });
-    } catch (err) {
-      console.error(err);
-      await send({ type: "error", error: "エラーが起きました。もう一度試してください。" }).catch(() => {});
-    } finally {
-      await writer.close().catch(() => {});
-    }
-  })();
-
-  return new Response(readable, {
-    headers: { "Content-Type": "application/x-ndjson; charset=utf-8", "Cache-Control": "no-cache" },
+  return new Response(res.body, {
+    headers: { "Content-Type": "text/event-stream; charset=utf-8", "Cache-Control": "no-cache" },
   });
 }
 
